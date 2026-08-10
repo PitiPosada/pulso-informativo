@@ -253,6 +253,28 @@ def generar_reporte_diario() -> None:
 
 # ---------------------------------------------------------------- notificación Telegram
 
+def escape_markdown(texto: str) -> str:
+    """Escapa caracteres especiales de Markdown para que Telegram no rompa el mensaje."""
+    if not texto:
+        return texto
+    import re as re_mod
+    return re_mod.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", texto)
+
+
+def limpiar_resumen(resumen: str | None, max_chars: int = 300) -> str:
+    """Convierte el resumen RSS (HTML) en texto plano legible para Telegram."""
+    if not resumen:
+        return ""
+    import html as html_mod
+    import re as re_mod
+    texto = re_mod.sub(r"<[^>]+>", " ", resumen)          # quita etiquetas HTML
+    texto = html_mod.unescape(texto)                      # &aacute; -> á
+    texto = re_mod.sub(r"\s+", " ", texto).strip()        # colapsa espacios
+    if len(texto) > max_chars:
+        texto = texto[:max_chars].rsplit(" ", 1)[0] + "…"
+    return texto
+
+
 async def notificar_pendientes():
     """Manda a Telegram todo lo detectado desde el último aviso (notificada=0)."""
     if not bot:
@@ -270,7 +292,15 @@ async def notificar_pendientes():
 
         log.info(f"Notificando {len(pendientes)} noticias nuevas")
         for n in pendientes:
-            texto = f"*{n['fuente']}*\n{n['titulo']}"
+            fuente = escape_markdown(n["fuente"])
+            titulo = escape_markdown(n["titulo"])
+            resumen = limpiar_resumen(n["resumen"])
+            if resumen:
+                texto = (f"*{fuente}*\n"
+                         f"{titulo}\n\n"
+                         f"_{escape_markdown(resumen)}_")
+            else:
+                texto = f"*{fuente}*\n{titulo}"
             teclado = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🔴 Última hora", callback_data=f"cat:ultima_hora:{n['id']}"),
