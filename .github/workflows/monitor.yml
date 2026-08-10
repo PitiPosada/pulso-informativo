@@ -1,10 +1,10 @@
 name: Monitor de noticias
 
-# Monitorea fuentes RSS cada 20 min y notifica a Telegram.
+# Monitorea fuentes RSS cada 5 min (mínimo permitido por GitHub Actions) y notifica a Telegram.
 on:
   schedule:
-    # cada 20 minutos (levantado por GitHub en UTC)
-    - cron: "*/20 * * * *"
+    # cada 5 minutos (hora UTC) - intervalo mínimo de GitHub Actions
+    - cron: "*/5 * * * *"
   workflow_dispatch: # para probarlo a mano desde la pestaña Actions
 
 permissions:
