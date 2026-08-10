@@ -52,11 +52,13 @@ def fetch_fuente(fuente: dict) -> list[dict]:
     try:
         feed = feedparser.parse(fuente["url"])
         for entry in feed.entries:
+            imagen, video = _extraer_media(entry)
             items.append({
                 "titulo": entry.get("title", "").strip(),
                 "link": entry.get("link", "").strip(),
                 "resumen": entry.get("summary", "")[:500],
-                "imagen_url": _extraer_imagen(entry),
+                "imagen_url": imagen,
+                "video_url": video,
                 "fecha_publicacion": entry.get("published", ""),
                 "fuente": fuente["nombre"],
             })
@@ -65,14 +67,36 @@ def fetch_fuente(fuente: dict) -> list[dict]:
     return items
 
 
-def _extraer_imagen(entry) -> str | None:
-    if "media_content" in entry and entry.media_content:
-        return entry.media_content[0].get("url")
-    if "links" in entry:
-        for l in entry.links:
-            if l.get("type", "").startswith("image/"):
-                return l.get("href")
-    return None
+def _extraer_media(entry) -> tuple[str | None, str | None]:
+    """Devuelve (imagen_url, video_url) extrayendo ambos del RSS si existen."""
+    imagen = None
+    video = None
+
+    for mc in entry.get("media_content", []):
+        tipo = (mc.get("type") or "").lower()
+        if "video" in tipo and not video:
+            video = mc.get("url")
+        elif "image" in tipo and not imagen:
+            imagen = mc.get("url")
+
+    for e in entry.get("enclosures", []):
+        tipo = (e.get("type") or "").lower()
+        if "video" in tipo and not video:
+            video = e.get("href") or e.get("url")
+        elif "image" in tipo and not imagen:
+            imagen = e.get("href") or e.get("url")
+
+    for l in entry.get("links", []):
+        tipo = (l.get("type") or "").lower()
+        if not video and "video" in tipo:
+            video = l.get("href")
+        elif not imagen and tipo.startswith("image/"):
+            imagen = l.get("href")
+
+    if not imagen and "media_thumbnail" in entry and entry.media_thumbnail:
+        imagen = entry.media_thumbnail[0].get("url")
+
+    return imagen or None, video or None
 
 
 def recolectar_todas_las_fuentes() -> list[dict]:
@@ -118,6 +142,113 @@ def guardar_si_no_duplicada(item: dict) -> bool:
              item["imagen_url"], item["fecha_publicacion"], h, t_norm),
         )
         return True
+
+
+# ---------------------------------------------------------------- guardar multimedia aprobada
+
+def descargar_media(url, destino: str) -> str | None:
+    """Descarga un archivo (imagen/video) con headers de navegador reales.
+
+    Muchos CDN (Infobae, por ejemplo) bloquean descargas directas por hotlink
+    ("access denied"). Enviar un User-Agent + Referer normales lo evita.
+    Devuelve la ruta relativa guardada, o None si falla.
+    """
+    if not url:
+        return None
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0 Safari/537.36"),
+            "Referer": "https://www.google.com/",
+            "Accept": "*/*",
+        })
+        os.makedirs(os.path.dirname(destino), exist_ok=True)
+        with urllib.request.urlopen(req, timeout=20) as resp, open(destino, "wb") as f:
+            f.write(resp.read())
+        log.info(f"Multimedia guardada: {destino}")
+        return destino
+    except Exception as e:
+        log.warning(f"No se pudo descargar multimedia {url}: {e}")
+        return None
+
+
+def guardar_media_noticia(noticia_id: int) -> None:
+    """Descarga imagen y/o video de una noticia aprobada a media/YYYY-MM-DD/."""
+    with get_conn() as conn:
+        n = conn.execute("SELECT * FROM noticias WHERE id = ?", (noticia_id,)).fetchone()
+        if not n:
+            return
+        fecha = (n["fecha_aprobada"] or n["fecha_detectada"] or "")[:10] or "sin-fecha"
+        carpeta = os.path.join("media", fecha)
+        media_guardada = None
+        media_tipo = None
+
+        if n["imagen_url"]:
+            destino = os.path.join(carpeta, f"{noticia_id}_img{_extension(n['imagen_url'], 'jpg')}")
+            if descargar_media(n["imagen_url"], destino):
+                media_guardada, media_tipo = destino, "imagen"
+        if not media_guardada and n["video_url"]:
+            destino = os.path.join(carpeta, f"{noticia_id}_vid{_extension(n['video_url'], 'mp4')}")
+            if descargar_media(n["video_url"], destino):
+                media_guardada, media_tipo = destino, "video"
+
+        if media_guardada:
+            conn.execute(
+                "UPDATE noticias SET media_path = ?, media_tipo = ? WHERE id = ?",
+                (media_guardada.replace("\\", "/"), media_tipo, noticia_id),
+            )
+
+
+def _extension(url: str | None, defecto: str) -> str:
+    if not url:
+        return f".{defecto}"
+    camino = url.split("?")[0].rstrip("/")
+    ext = camino.rsplit(".", 1)[-1]
+    return f".{ext}" if len(ext) in (3, 4) and ext.isalnum() else f".{defecto}"
+
+
+def generar_reporte_diario() -> None:
+    """Escribe aprobadas/YYYY-MM-DD.md con las noticias aprobadas de cada día.
+
+    Se ejecuta al final de cada ciclo del workflow, para que el archivo quede
+    dentro del repo y puedas verlo en el navegador o descargarlo.
+    """
+    with get_conn() as conn:
+        aprobadas = conn.execute(
+            "SELECT * FROM noticias WHERE estado = 'aprobada' ORDER BY fecha_aprobada ASC"
+        ).fetchall()
+
+    por_dia: dict[str, list] = {}
+    for n in aprobadas:
+        dia = (n["fecha_aprobada"] or n["fecha_detectada"] or "")[:10] or "sin-fecha"
+        por_dia.setdefault(dia, []).append(n)
+
+    for dia, noticias in por_dia.items():
+        lineas = [f"# Noticias aprobadas - {dia}", ""]
+        for n in noticias:
+            categoria = n["categoria"] or "sin categoría"
+            media = f"[{n['media_tipo']}]({n['media_path']})" if n["media_path"] else "(sin multimedia)"
+            extra = []
+            if n["imagen_url"]:
+                extra.append(f"Imagen URL: {n['imagen_url']}")
+            if n["video_url"]:
+                extra.append(f"Video URL: {n['video_url']}")
+            lineas += [
+                f"## [{n['titulo']}]({n['link']})",
+                f"- Fuente: {n['fuente']}",
+                f"- Categoría: {categoria}",
+                f"- Media: {media}",
+                *[f"- {e}" for e in extra],
+                f"- Detectada: {n['fecha_detectada']}",
+                "",
+            ]
+        ruta = os.path.join("aprobadas", f"{dia}.md")
+        os.makedirs("aprobadas", exist_ok=True)
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write("\n".join(lineas))
+        log.info(f"Reporte diario actualizado: {ruta}")
 
 
 # ---------------------------------------------------------------- notificación Telegram
@@ -222,10 +353,18 @@ async def procesar_respuestas():
 
         with get_conn() as conn:
             if categoria:
-                conn.execute("UPDATE noticias SET estado = ?, categoria = ? WHERE id = ?",
-                             (nuevo_estado, categoria, noticia_id))
+                conn.execute(
+                    "UPDATE noticias SET estado = ?, categoria = ?, fecha_aprobada = ? WHERE id = ?",
+                    (nuevo_estado, categoria, datetime.now().isoformat(timespec="seconds"), noticia_id),
+                )
             else:
-                conn.execute("UPDATE noticias SET estado = ? WHERE id = ?", (nuevo_estado, noticia_id))
+                conn.execute(
+                    "UPDATE noticias SET estado = ?, fecha_aprobada = ? WHERE id = ?",
+                    (nuevo_estado, datetime.now().isoformat(timespec="seconds"), noticia_id),
+                )
+
+        if nuevo_estado == "aprobada":
+            guardar_media_noticia(noticia_id)
 
         etiquetas_categoria = {
             "ultima_hora": "🔴 Última hora",
@@ -289,6 +428,7 @@ def run_una_vez():
 
     ciclo_scraping()
     asyncio.run(procesar_respuestas())
+    generar_reporte_diario()
     asyncio.run(notificar_pendientes())
 
     log.info("Ciclo único completado")

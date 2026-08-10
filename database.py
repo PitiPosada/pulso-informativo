@@ -35,8 +35,14 @@ CREATE TABLE IF NOT EXISTS noticias (
     descripcion_humanizada TEXT,
     hashtags TEXT,
 
+    -- multimedia descargada (imagen/video) al aprobar
+    video_url TEXT,
+    media_path TEXT,
+    media_tipo TEXT,
+
     -- flujo de aprobación / publicación
     estado TEXT NOT NULL DEFAULT 'nueva',  -- nueva|descartada|aprobada|generada|programada|publicada
+    fecha_aprobada TEXT,
     fecha_programada TEXT,
     fecha_publicada TEXT,
     telegram_msg_id INTEGER,
@@ -70,6 +76,21 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrar_columnas(conn)
+
+
+def _migrar_columnas(conn):
+    """Agrega las columnas nuevas si la DB es de una versión anterior (sin perder datos)."""
+    existentes = {r["name"] for r in conn.execute("PRAGMA table_info(noticias)")}
+    columnas_nuevas = {
+        "video_url": "TEXT",
+        "media_path": "TEXT",
+        "media_tipo": "TEXT",
+        "fecha_aprobada": "TEXT",
+    }
+    for columna, tipo in columnas_nuevas.items():
+        if columna not in existentes:
+            conn.execute(f"ALTER TABLE noticias ADD COLUMN {columna} {tipo}")
 
 
 def get_meta(clave: str, default=None):
