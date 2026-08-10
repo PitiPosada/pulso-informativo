@@ -1,5 +1,6 @@
 name: Monitor de noticias
 
+# Monitorea fuentes RSS cada 20 min y notifica a Telegram.
 on:
   schedule:
     # cada 20 minutos (levantado por GitHub en UTC)
