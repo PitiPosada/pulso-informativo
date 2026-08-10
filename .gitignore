@@ -1,0 +1,11 @@
+# Entornos virtuales
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Imágenes y archivos locales que el monitor no necesita
+*.png
+
+# Base de datos: SE COMMITEA a propósito (es el estado del monitor)
+# pulso_informativo.db  <-- no incluir esta línea, la DB sí se sube
